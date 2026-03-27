@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.agentgraph-co/mcp-security-scan",
+  "description": "Security scanner for MCP servers — detects hardcoded secrets, unsafe execution, data exfiltration, filesystem risks, and code obfuscation. Generates trust scores (0-100) and integrates with CI/CD via GitHub Actions.",
+  "repository": {
+    "url": "https://github.com/agentgraph-co/mcp-security-scan",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "pip",
+      "identifier": "mcp-security-scan",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

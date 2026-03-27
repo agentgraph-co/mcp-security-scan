@@ -1,0 +1,17 @@
+startCommand:
+  type: stdio
+
+configSchema:
+  type: object
+  required: []
+  properties:
+    repo:
+      type: string
+      description: "GitHub repo to scan (owner/repo)"
+    token:
+      type: string
+      description: "GitHub API token"
+
+commandFunction:
+  |-
+  config => ({ command: 'mcp-security-scan', args: [config.repo || '', '--format', 'json'].filter(Boolean) })
