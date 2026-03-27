@@ -140,8 +140,8 @@ def _format_github_comment(result: ScanResult) -> str:
             lines.append(f"- :white_check_mark: **{label}** — Clear")
 
     lines.append("")
-    lines.append(f"| Metric | Value |")
-    lines.append(f"|--------|-------|")
+    lines.append("| Metric | Value |")
+    lines.append("|--------|-------|")
     lines.append(f"| Files scanned | {result.files_scanned} |")
     lines.append(f"| Language | {result.primary_language} |")
 

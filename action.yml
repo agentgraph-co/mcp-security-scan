@@ -1,10 +1,10 @@
 name: "MCP Security Scan"
-description: "Scan MCP servers for hardcoded secrets, unsafe exec patterns, and missing auth"
+description: "Security scanner for MCP servers — detects hardcoded secrets, unsafe execution, data exfiltration, filesystem risks, and missing auth. Generates trust scores and posts results as PR comments."
 author: "AgentGraph"
 
 branding:
   icon: "shield"
-  color: "purple"
+  color: "blue"
 
 inputs:
   repo:
