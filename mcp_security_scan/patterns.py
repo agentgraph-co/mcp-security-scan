@@ -160,6 +160,71 @@ FS_ACCESS_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     ),
 ]
 
+# --- Data exfiltration patterns ---
+# Network calls that could send data to external servers.
+EXFILTRATION_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
+    (
+        "HTTP request to external URL",
+        re.compile(
+            r"""(?:fetch|axios|requests?\.(?:get|post|put|patch)|httpx?\."""
+            r"""(?:get|post|put|patch)|urllib\.request|http\.request)\s*\(""",
+        ),
+        "medium",
+    ),
+    (
+        "WebSocket connection",
+        re.compile(r"""(?:WebSocket|ws\.connect|socket\.io)\s*\("""),
+        "medium",
+    ),
+    (
+        "DNS lookup / network resolve",
+        re.compile(r"""(?:dns\.resolve|dns\.lookup|socket\.getaddrinfo)\s*\("""),
+        "low",
+    ),
+    (
+        "Environment variable access",
+        re.compile(
+            r"""(?:process\.env|os\.environ|os\.getenv|env::var)\s*[\[.(]""",
+        ),
+        "medium",
+    ),
+    (
+        "Base64 encode before send",
+        re.compile(r"""(?:btoa|base64\.b64encode|Buffer\.from.*toString.*base64)"""),
+        "medium",
+    ),
+]
+
+# --- Code obfuscation patterns ---
+# Patterns that suggest intentional hiding of behavior.
+OBFUSCATION_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
+    (
+        "Hex-encoded string execution",
+        re.compile(r"""\\x[0-9a-fA-F]{2}(?:\\x[0-9a-fA-F]{2}){8,}"""),
+        "high",
+    ),
+    (
+        "Unicode escape sequence (long)",
+        re.compile(r"""\\u[0-9a-fA-F]{4}(?:\\u[0-9a-fA-F]{4}){4,}"""),
+        "high",
+    ),
+    (
+        "eval with string concatenation",
+        re.compile(r"""eval\s*\(\s*['"][^'"]*['"]\s*\+"""),
+        "critical",
+    ),
+    (
+        "Dynamic require/import with variable",
+        re.compile(r"""(?:require|import)\s*\(\s*[a-zA-Z_]"""),
+        "medium",
+    ),
+    (
+        "Encoded payload in string",
+        re.compile(r"""['\"][A-Za-z0-9+/]{60,}={0,2}['"]"""),
+        "medium",
+    ),
+]
+
 # --- Auth/security positive signals ---
 # These REDUCE risk when found.
 AUTH_POSITIVE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [

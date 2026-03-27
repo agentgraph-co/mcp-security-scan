@@ -111,19 +111,39 @@ def _format_github_comment(result: ScanResult) -> str:
         badge = ":x:"
         grade = "Concern"
 
+    # Category breakdown
+    categories: dict[str, int] = {}
+    for f in result.findings:
+        categories[f.category] = categories.get(f.category, 0) + 1
+
+    _CATEGORY_LABELS = {
+        "secret": ("Credential Theft", ":key:"),
+        "exfiltration": ("Data Exfiltration", ":satellite:"),
+        "unsafe_exec": ("Unsafe Execution", ":warning:"),
+        "fs_access": ("Filesystem Access", ":file_folder:"),
+        "obfuscation": ("Code Obfuscation", ":detective:"),
+    }
+
     lines = [
         "## MCP Security Scan Results",
         "",
         f"{badge} **Trust Score: {result.trust_score}/100** ({grade})",
         "",
-        f"| Metric | Value |",
-        f"|--------|-------|",
-        f"| Files scanned | {result.files_scanned} |",
-        f"| Critical findings | {result.critical_count} |",
-        f"| High findings | {result.high_count} |",
-        f"| Medium findings | {result.medium_count} |",
-        f"| Language | {result.primary_language} |",
     ]
+
+    # Cheo-style category checks
+    for cat_key, (label, icon) in _CATEGORY_LABELS.items():
+        count = categories.get(cat_key, 0)
+        if count > 0:
+            lines.append(f"- {icon} **{label}** — {count} finding{'s' if count != 1 else ''}")
+        else:
+            lines.append(f"- :white_check_mark: **{label}** — Clear")
+
+    lines.append("")
+    lines.append(f"| Metric | Value |")
+    lines.append(f"|--------|-------|")
+    lines.append(f"| Files scanned | {result.files_scanned} |")
+    lines.append(f"| Language | {result.primary_language} |")
 
     if result.positive_signals:
         signals = ", ".join(sorted(set(result.positive_signals)))
