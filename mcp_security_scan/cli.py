@@ -193,7 +193,9 @@ async def _run(args: argparse.Namespace) -> int:
             # Parse github.com/owner/repo from SSH or HTTPS URL
             if "github.com" in url:
                 parts = url.split("github.com")[-1]
-                parts = parts.lstrip(":/").rstrip(".git")
+                parts = parts.lstrip(":/")
+                if parts.endswith(".git"):
+                    parts = parts[:-4]
                 repo = parts
         except Exception:
             pass
