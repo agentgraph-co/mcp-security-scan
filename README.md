@@ -71,7 +71,7 @@ That's it. The action will:
 ### CLI
 
 ```bash
-pip install git+https://github.com/agentgraph-co/mcp-security-scan.git
+pip install mcp-security-scan
 
 # Scan any MCP server repo on GitHub
 mcp-security-scan owner/repo
