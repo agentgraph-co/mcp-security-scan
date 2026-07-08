@@ -270,3 +270,322 @@ SOURCE_EXTENSIONS = frozenset({
     ".yaml", ".yml", ".toml", ".json", ".env",
     ".cfg", ".ini", ".conf",
 })
+
+# --- Dynamic remote payload / rug-pull (external-URL-swap) ---
+# category="dynamic_remote_load". Flags a skill/MCP tool that fetches code, config,
+# prompts, or tool definitions from an EXTERNAL URL that the owner can SWAP after a
+# user has integrated it — the mutable-remote-payload / rug-pull threat class. This
+# is distinct from EXFILTRATION (data leaving) — here untrusted content is coming IN
+# and being executed/trusted, and the remote is mutable so a clean scan can go rogue.
+DYNAMIC_REMOTE_LOAD_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
+    # (A) fetch-then-exec on one line — highest confidence
+    (
+        "Remote fetch piped into eval/exec (Python)",
+        re.compile(
+            r"""(?:eval|exec)\s*\(\s*(?:requests\.(?:get|post)|httpx\.(?:get|post)|urllib\.request\.urlopen|urlopen)\s*\(""",
+        ),
+        "critical",
+    ),
+    (
+        "Remote response text fed to exec/eval (Python)",
+        re.compile(r"""(?:eval|exec)\s*\(.*\.(?:text|content|body|json\(\))"""),
+        "high",
+    ),
+    (
+        "Remote fetch into Function/eval (JS)",
+        re.compile(r"""(?:eval|new\s+Function)\s*\(\s*await\s+(?:fetch|axios\.get)\s*\("""),
+        "critical",
+    ),
+    (
+        "vm.runInContext on fetched content (Node)",
+        re.compile(r"""vm\.(?:runInContext|runInNewContext|compileFunction)\s*\("""),
+        "high",
+    ),
+    # (B) remote code/module load — download then import/run
+    (
+        "Remote pickle/marshal load from response",
+        re.compile(
+            r"""(?:pickle|marshal)\.loads?\s*\(\s*(?:requests\.|httpx\.|urlopen|response|resp|r)\b""",
+        ),
+        "critical",
+    ),
+    (
+        "Runtime pip install from remote URL/git",
+        re.compile(
+            r"""subprocess\.[a-z_]+\([^)]*pip['"]?\s*,?\s*['"]?install[^)]*(?:https?://|git\+|\.git\b)""",
+            re.IGNORECASE,
+        ),
+        "high",
+    ),
+    # (C) remote-hosted tool description / prompt / config
+    (
+        "Tool description/prompt built from remote fetch",
+        re.compile(
+            r"""(?:description|instructions?|prompt|system_prompt|tools?)\s*=\s*(?:await\s+)?(?:requests\.get|httpx\.get|fetch|axios\.get|urlopen)\s*\(""",
+            re.IGNORECASE,
+        ),
+        "critical",
+    ),
+    # (D) auto-update-from-URL / self-update loop
+    (
+        "Auto-update payload from hardcoded endpoint",
+        re.compile(
+            r"""(?:update|refresh|reload|self_update|check_update)[\w_]*\s*\([^)]*https?://""",
+            re.IGNORECASE,
+        ),
+        "high",
+    ),
+    # (E) pipe-to-shell (rug-pull via install/launch)
+    (
+        "curl/wget piped to shell",
+        re.compile(
+            r"""(?:curl|wget)\s+[^\n|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b|python3?\s+<\(\s*(?:curl|wget)""",
+        ),
+        "critical",
+    ),
+    # (F) NON-PINNED remote resource feeding load/exec (mutable ref = swappable)
+    (
+        "Unpinned remote resource (branch/latest/HEAD)",
+        re.compile(
+            r"""https?://[^\s'"]+/(?:raw/)?(?:main|master|HEAD|latest)/[^\s'"]+\.(?:py|js|ts|sh|json)""",
+            re.IGNORECASE,
+        ),
+        "medium",
+    ),
+    (
+        "Unpinned npx/uvx package (no @version pin)",
+        re.compile(r"""\b(?:npx|uvx)\s+(?!.*@)[a-zA-Z@][\w\-/]+"""),
+        "medium",
+    ),
+]
+
+# Co-occurrence pass: a network read + an exec sink in the same file (split across
+# lines) is the classic rug-pull loader the per-line scan can't see.
+NET_READ_RE = re.compile(
+    r"""requests\.(?:get|post)|httpx\.(?:get|post)|urllib\.request\.urlopen|urlopen\s*\(|"""
+    r"""fetch\s*\(|axios\.(?:get|post)""",
+)
+EXEC_SINK_RE = re.compile(
+    r"""\beval\s*\(|\bexec\s*\(|new\s+Function\s*\(|vm\.run|"""
+    r"""(?:pickle|marshal)\.loads?\s*\(|importlib\.""",
+)
+
+# --- Toxic-flow / capability composition — the "lethal trifecta" ---
+# category="toxic_flow". Individually-benign capabilities that compose into an attack
+# chain: a tool that (1) reads PRIVATE DATA, (2) ingests UNTRUSTED CONTENT, and (3)
+# can SEND OUTBOUND is a prompt-injection→exfiltration chain even if each part is fine.
+# All three legs must be present in one file to keep precision high.
+
+# Leg 1a — high-confidence private-data read (env / credential files / keychain)
+SENSITIVE_READ_RE = re.compile(
+    r"""os\.environ|os\.getenv\s*\(|\bgetenv\s*\(|process\.env\b|"""
+    r"""["'][^"'\n]*(?:\.ssh/|\.aws/credentials|\.aws/config|\.netrc|id_rsa|/\.env\b|\.pem\b)|"""
+    r"""keyring\.get_password|\bkeychain\b|SecItemCopy|CredentialCache""",
+    re.IGNORECASE,
+)
+# Leg 1b — generic file/listing read (weaker private-data signal → lower severity)
+FILE_READ_RE = re.compile(
+    r"""open\s*\([^)]*\)\s*\.?\s*read|\.read_text\s*\(|\.read_bytes\s*\(|"""
+    r"""fs\.readFile(?:Sync)?\s*\(|\breadFileSync\s*\(|"""
+    r"""\bglob\.glob\s*\(|os\.listdir\s*\(|os\.walk\s*\(""",
+)
+# Leg 2 — untrusted/attacker-influenceable INBOUND input (fetched content or request
+# body). Deliberately excludes requests.post/put (those are OUTBOUND, leg 3) so a plain
+# API-wrapper POST cannot masquerade as the untrusted-input leg.
+UNTRUSTED_INPUT_RE = re.compile(
+    r"""requests\.get\b|httpx\.get\b|urllib\.request\.urlopen|urlopen\s*\(|"""
+    r"""\bfetch\s*\(|axios\.get\b|"""
+    r"""request\.(?:json|body|args|form|data|files|params|values)|req\.(?:body|query|params)|"""
+    r"""\bwebhook\b""",
+    re.IGNORECASE,
+)
+# Leg 3 — outbound send (data leaves the tool)
+OUTBOUND_SEND_RE = re.compile(
+    r"""requests\.(?:post|put|patch)\s*\(|httpx\.(?:post|put|patch)\s*\(|"""
+    r"""axios\.(?:post|put)\s*\(|fetch\s*\([^)]*(?:method\s*[:=]\s*['"]POST|['"]POST['"])|"""
+    r"""\bsmtplib\b|\bsendmail\b|\.send(?:_message)?\s*\(|"""
+    r"""socket\.(?:send|sendto|connect)\s*\(|"""
+    r"""(?:slack|discord|telegram)[._]\w*(?:send|post|message|webhook)|"""
+    r"""boto3[^\n]*put_object|\.upload_file\s*\(|"""
+    r"""dns\.resolver|socket\.gethostbyname""",
+    re.IGNORECASE,
+)
+
+# --- Insecure deserialization ---
+# category="insecure_deserialization". Deserializing untrusted data with a format that
+# can construct arbitrary objects = RCE. Distinct from unsafe_exec.
+INSECURE_DESERIALIZATION_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
+    (
+        "pickle.load(s) on untrusted data (Python)",
+        re.compile(r"""\b(?:cPickle|_pickle|pickle)\.loads?\s*\("""),
+        "high",
+    ),
+    (
+        "marshal.load(s) (Python)",
+        re.compile(r"""\bmarshal\.loads?\s*\("""),
+        "high",
+    ),
+    (
+        "dill.load(s) (Python)",
+        re.compile(r"""\bdill\.loads?\s*\("""),
+        "high",
+    ),
+    (
+        "jsonpickle.decode (Python)",
+        re.compile(r"""\bjsonpickle\.decode\s*\("""),
+        "high",
+    ),
+    (
+        "yaml.load without SafeLoader (Python)",
+        re.compile(r"""\byaml\.(?:unsafe_)?load(?:_all)?\s*\((?!.*Safe)""", re.IGNORECASE),
+        "high",
+    ),
+    (
+        "numpy.load allow_pickle=True (Python)",
+        re.compile(r"""\ballow_pickle\s*=\s*True\b"""),
+        "high",
+    ),
+    (
+        "torch.load (pickle-backed) (Python)",
+        re.compile(r"""\btorch\.load\s*\("""),
+        "medium",
+    ),
+    (
+        "Java/Ruby native deserialization",
+        re.compile(r"""\bObjectInputStream\s*\(|\bMarshal\.load\b|\bYAML\.unsafe_load\b"""),
+        "high",
+    ),
+]
+
+# --- Manifest command exec / MCPoison rug-pull ---
+# CVE-2025-54136. An MCP manifest (mcp.json / server.json) whose command/args launch an
+# inline interpreter-eval or pipe-to-shell — a mutable config the client re-reads, so a
+# swapped command runs on the user's machine. category="dynamic_remote_load" (same
+# rug-pull family). Run over the reconstructed "command + args" string, not per-line.
+MANIFEST_EXEC_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
+    (
+        "MCP manifest command pipes remote fetch to shell",
+        re.compile(r"""(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b""", re.IGNORECASE),
+        "critical",
+    ),
+    (
+        "MCP manifest shell -c invokes remote fetch",
+        re.compile(r"""\b(?:ba)?sh\b[^\n]*-c\b[^\n]*(?:curl|wget|https?://)""", re.IGNORECASE),
+        "critical",
+    ),
+    (
+        "MCP manifest runs inline interpreter eval (node -e / python -c)",
+        re.compile(
+            r"""\b(?:node|deno|bun)\b[^\n]*(?:\s-e\b|--eval\b)|"""
+            r"""\bpython3?\b[^\n]*\s-c\b|\bruby\b[^\n]*\s-e\b|\bperl\b[^\n]*\s-e\b""",
+            re.IGNORECASE,
+        ),
+        "high",
+    ),
+    (
+        "MCP manifest command fetches a remote script",
+        re.compile(r"""https?://\S+\.(?:sh|py|js|ts|rb|ps1)\b""", re.IGNORECASE),
+        "high",
+    ),
+    (
+        "MCP manifest launches unpinned npx/uvx package",
+        re.compile(r"""\b(?:npx|uvx)\s+(?:-y\s+)?(?!.*@)[a-zA-Z@][\w\-/]+"""),
+        "medium",
+    ),
+]
+
+# Dangerous content inside an npm lifecycle install hook.
+INSTALL_SCRIPT_DANGER_RE = re.compile(
+    r"""(?:curl|wget)\b|\|\s*(?:ba)?sh\b|\bnode\s+(?:-e|--eval)\b|"""
+    r"""\bpython3?\s+-c\b|base64\s+(?:-d|--decode|-D)\b|\beval\b|"""
+    r"""https?://|\bchmod\s+\+x\b|>\s*/dev/""",
+    re.IGNORECASE,
+)
+# npm lifecycle hooks that auto-run on `npm install` (the supply-chain entry point).
+NPM_INSTALL_HOOKS = ("preinstall", "install", "postinstall")
+
+# --- Invisible / smuggled Unicode (hidden-instruction vector) ---
+# category="hidden_unicode". Invisible characters in code/config/tool-metadata are a
+# prompt-injection smuggling vector: a tool description can carry instructions a human
+# reviewer never sees. Tags-block + bidi are essentially always malicious in this context.
+INVISIBLE_UNICODE_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
+    (
+        "Unicode Tags block (invisible smuggled instructions)",
+        re.compile(r"[\U000e0000-\U000e007f]"),
+        "critical",
+    ),
+    (
+        "Bidirectional control character (Trojan Source)",
+        re.compile("[\\u202a-\\u202e\\u2066-\\u2069]"),
+        "high",
+    ),
+    (
+        "Zero-width / invisible character",
+        re.compile("[\\u200b\\u200c\\u200d\\u2060\\u180e]"),
+        "medium",
+    ),
+    (
+        "ANSI escape sequence in text (hidden/spoofed content)",
+        re.compile(r"\x1b\["),
+        "medium",
+    ),
+]
+
+# --- Prompt injection / tool-description poisoning ---
+# category="prompt_injection". Imperative-override or hidden-instruction phrases in tool
+# descriptions / manifests / SKILL.md — the #1 agent-tool attack (tool poisoning).
+PROMPT_INJECTION_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
+    (
+        "Instruction-override phrase",
+        re.compile(
+            r"ignore\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s+instructions?"
+            r"|disregard\s+(?:the\s+)?(?:above|previous|prior|earlier|system)",
+            re.IGNORECASE,
+        ),
+        "high",
+    ),
+    (
+        "Hide-from-user directive (tool poisoning)",
+        re.compile(
+            r"(?:do\s+not|don't|never)\s+(?:tell|inform|mention|reveal|show)\s+(?:this\s+)?(?:to\s+)?the\s+user"
+            r"|without\s+(?:telling|informing|notifying)\s+the\s+user|hide\s+this\s+from",
+            re.IGNORECASE,
+        ),
+        "high",
+    ),
+    (
+        "Injected system/role directive",
+        re.compile(
+            r"<\s*/?\s*(?:system|important|instructions?)\s*>"
+            r"|(?:^|[\s\"'])system\s*prompt\s*:"
+            r"|you\s+are\s+now\s+(?:a|an|the)?\s"
+            r"|your\s+(?:new|real|actual)\s+(?:instructions?|task|role)\s+(?:is|are)",
+            re.IGNORECASE,
+        ),
+        "high",
+    ),
+    (
+        "Exfiltration directive in description",
+        re.compile(
+            r"send\s+(?:the\s+|all\s+)?(?:secret|api[_\s]?key|token|password|credential|env(?:ironment)?)"
+            r"[\w\s,]*?\s+to\s+https?://",
+            re.IGNORECASE,
+        ),
+        "critical",
+    ),
+    (
+        "Mandatory pre-tool action injection",
+        re.compile(
+            r"before\s+(?:using|calling|running)\s+(?:this|any|the)\s+tool.{0,40}?(?:you\s+must|always|first)",
+            re.IGNORECASE,
+        ),
+        "medium",
+    ),
+]
+
+# Files that ARE the tool's instruction surface (manifest / skill metadata). Prompt-injection
+# and invisible-unicode here are the ATTACK SURFACE, not documentation — scan them + never
+# downgrade. (mcp.json/server.json are already scanned via .json; SKILL.md is added here.)
+AGENT_METADATA_FILES = frozenset({
+    "skill.md", "mcp.json", "server.json", ".mcp.json", "ai-plugin.json", "agents.md",
+})

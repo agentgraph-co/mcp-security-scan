@@ -22,7 +22,7 @@ MCP servers run on your machine with access to your files, shell, and API keys â
 
 ## What it detects
 
-The open-source scanner covers six finding categories:
+Twelve finding categories, all open source:
 
 | Category | Examples |
 |----------|----------|
@@ -31,9 +31,15 @@ The open-source scanner covers six finding categories:
 | `exfiltration` | Env vars / secrets piped into network calls |
 | `fs_access` | "Read a file" servers that can walk the entire home directory |
 | `obfuscation` | Base64-packed or dynamically-assembled code |
+| `dynamic_remote_load` | Rug-pulls: fetch-then-exec, curl\|sh, unpinned npx/uvx, **manifest-exec (the MCPoison / CVE-2025-54136 class)** |
+| `hidden_unicode` | Invisible Unicode Tags, bidi controls (Trojan Source), zero-width chars smuggling instructions past review |
+| `prompt_injection` | Instruction-override / hide-from-user / exfil directives in tool descriptions, `mcp.json`, `SKILL.md` |
+| `insecure_deserialization` | `pickle.loads`, unsafe `yaml.load`, `torch.load` on untrusted data |
+| `install_hook` | npm `preinstall`/`postinstall` scripts that fetch, eval, or pipe to shell |
+| `toxic_flow` | **The lethal trifecta (the GitLost class)**: private-data read + untrusted input + outbound send composing in one tool |
 | Missing auth | Tool endpoints with no authentication boundary |
 
-The hosted scanner at **[agentgraph.co/check](https://agentgraph.co/check)** additionally detects rug-pull / dynamic remote loading, manifest-exec (the MCPoison class), invisible-Unicode payloads, prompt injection in tool descriptions and manifests, install-hook attacks, insecure deserialization, and lethal-trifecta capability compositions (the GitLost class) â€” and signs every verdict as an offline-verifiable attestation with tool-definition pinning and drift detection.
+The hosted scanner at **[agentgraph.co/check](https://agentgraph.co/check)** adds what a local one-shot scan structurally can't: every verdict **signed as an offline-verifiable attestation** (Ed25519/JWS), **tool-definition pinning** with **drift detection** across re-scans (a tool that changes after you vetted it fails verification), and vulnerable-dependency intelligence from a 35,689-endpoint scan corpus.
 
 ---
 

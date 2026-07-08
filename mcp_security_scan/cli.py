@@ -122,6 +122,12 @@ def _format_github_comment(result: ScanResult) -> str:
         "unsafe_exec": ("Unsafe Execution", ":warning:"),
         "fs_access": ("Filesystem Access", ":file_folder:"),
         "obfuscation": ("Code Obfuscation", ":detective:"),
+        "dynamic_remote_load": ("Rug-Pull / Remote Load", ":fishing_pole_and_fish:"),
+        "hidden_unicode": ("Hidden Unicode", ":ghost:"),
+        "prompt_injection": ("Prompt Injection", ":syringe:"),
+        "insecure_deserialization": ("Insecure Deserialization", ":package:"),
+        "install_hook": ("Install Hook", ":hook:"),
+        "toxic_flow": ("Lethal Trifecta", ":zap:"),
     }
 
     lines = [

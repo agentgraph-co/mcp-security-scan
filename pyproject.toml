@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-security-scan"
-version = "1.0.0"
+version = "1.1.0"
 description = "Security scanner for MCP servers — finds hardcoded secrets, unsafe exec, missing auth"
 readme = "README.md"
 license = {text = "MIT"}

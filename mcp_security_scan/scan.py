@@ -4,6 +4,7 @@ Fetches source files from GitHub repos and scans for security issues.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -12,15 +13,29 @@ from pathlib import Path
 import httpx
 
 from mcp_security_scan.patterns import (
+    AGENT_METADATA_FILES,
     AUTH_POSITIVE_PATTERNS,
+    DYNAMIC_REMOTE_LOAD_PATTERNS,
+    EXEC_SINK_RE,
     EXFILTRATION_PATTERNS,
+    FILE_READ_RE,
     FS_ACCESS_PATTERNS,
+    INSECURE_DESERIALIZATION_PATTERNS,
+    INSTALL_SCRIPT_DANGER_RE,
+    INVISIBLE_UNICODE_PATTERNS,
+    MANIFEST_EXEC_PATTERNS,
+    NET_READ_RE,
+    NPM_INSTALL_HOOKS,
     OBFUSCATION_PATTERNS,
+    OUTBOUND_SEND_RE,
+    PROMPT_INJECTION_PATTERNS,
     SECRET_PATTERNS,
+    SENSITIVE_READ_RE,
     SKIP_DIRS,
     SKIP_EXTENSIONS,
     SOURCE_EXTENSIONS,
     UNSAFE_EXEC_PATTERNS,
+    UNTRUSTED_INPUT_RE,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,8 +105,30 @@ def _should_skip_path(path: str) -> bool:
 
 def _is_source_file(path: str) -> bool:
     """Check if a file should be scanned for source patterns."""
+    # Agent/tool metadata (SKILL.md, mcp.json, …) IS the tool's instruction
+    # surface — always scan it, even if the extension isn't source-like.
+    if Path(path).name.lower() in AGENT_METADATA_FILES:
+        return True
     ext = Path(path).suffix.lower()
     return ext in SOURCE_EXTENSIONS
+
+
+def _is_test_or_doc_file(file_path: str) -> bool:
+    """Check if a file is a test, doc, or example file (lower severity)."""
+    lower = file_path.lower()
+    parts = Path(file_path).parts
+    if any(p in ("tests", "test", "spec", "__tests__", "testing") for p in parts):
+        return True
+    name = Path(file_path).stem.lower()
+    if name.startswith("test_") or name.endswith("_test") or name.endswith("_spec"):
+        return True
+    if name == "conftest":
+        return True
+    if any(p in ("docs", "doc", "examples", "example", "samples") for p in parts):
+        return True
+    if ".example" in lower or ".sample" in lower or ".template" in lower:
+        return True
+    return False
 
 
 def _redact_secret(line: str, match: re.Match) -> str:  # type: ignore[type-arg]
@@ -182,6 +219,10 @@ def _scan_content(
     findings: list[Finding] = []
     positives: list[str] = []
 
+    is_test_or_doc = _is_test_or_doc_file(file_path)
+    # Manifest / skill files ARE the tool's instruction surface — never downgrade
+    # prompt-injection / hidden-unicode there even if they look doc-ish.
+    is_metadata = Path(file_path).name.lower() in AGENT_METADATA_FILES
     lines = content.split("\n")
 
     for line_num, line in enumerate(lines, 1):
@@ -262,12 +303,242 @@ def _scan_content(
                 ))
                 break
 
+        # Check insecure deserialization — RCE class
+        for name, pattern, severity in INSECURE_DESERIALIZATION_PATTERNS:
+            if pattern.search(line):
+                effective_severity = severity
+                if is_test_or_doc and severity in ("critical", "high"):
+                    effective_severity = "medium"
+                findings.append(Finding(
+                    category="insecure_deserialization",
+                    name=name,
+                    severity=effective_severity,
+                    file_path=file_path,
+                    line_number=line_num,
+                    snippet=stripped[:120],
+                ))
+                break
+
+        # Check dynamic remote payload / rug-pull (external-URL-swap)
+        for name, pattern, severity in DYNAMIC_REMOTE_LOAD_PATTERNS:
+            if pattern.search(line):
+                effective_severity = severity
+                if is_test_or_doc and severity in ("critical", "high"):
+                    effective_severity = "medium"
+                findings.append(Finding(
+                    category="dynamic_remote_load",
+                    name=name,
+                    severity=effective_severity,
+                    file_path=file_path,
+                    line_number=line_num,
+                    snippet=stripped[:120],
+                ))
+                break
+
+        # Check invisible / smuggled Unicode (dangerous anywhere — no downgrade)
+        for name, pattern, severity in INVISIBLE_UNICODE_PATTERNS:
+            if pattern.search(line):
+                findings.append(Finding(
+                    category="hidden_unicode",
+                    name=name,
+                    severity=severity,
+                    file_path=file_path,
+                    line_number=line_num,
+                    snippet=stripped[:120],
+                ))
+                break
+
+        # Check prompt injection / tool-description poisoning
+        for name, pattern, severity in PROMPT_INJECTION_PATTERNS:
+            if pattern.search(line):
+                # Downgrade in test/doc/example files — EXCEPT manifest/skill
+                # metadata, which is the actual attack surface.
+                effective_severity = severity
+                if is_test_or_doc and not is_metadata and severity in ("critical", "high"):
+                    effective_severity = "medium"
+                findings.append(Finding(
+                    category="prompt_injection",
+                    name=name,
+                    severity=effective_severity,
+                    file_path=file_path,
+                    line_number=line_num,
+                    snippet=stripped[:120],
+                ))
+                break
+
+    # Split fetch->exec across lines: a network read + an exec sink co-occurring in
+    # one file is the classic rug-pull loader the per-line scan can't see. Fire only
+    # when they're within ~40 lines of each other (keeps the composite finding tight).
+    if not is_test_or_doc and NET_READ_RE.search(content) and EXEC_SINK_RE.search(content):
+        net_lines = [i for i, ln in enumerate(lines) if NET_READ_RE.search(ln)]
+        exec_lines = [i for i, ln in enumerate(lines) if EXEC_SINK_RE.search(ln)]
+        if net_lines and exec_lines and any(
+            abs(n - e) <= 40 for n in net_lines for e in exec_lines
+        ):
+            findings.append(Finding(
+                category="dynamic_remote_load",
+                name="Remote fetch + dynamic exec in same file (possible rug-pull)",
+                severity="high",
+                file_path=file_path,
+                line_number=min(net_lines) + 1,
+                snippet="network read + exec sink co-occur — remote payload may be swappable",
+            ))
+
+    # Manifest command/args rug-pull (MCPoison, CVE-2025-54136) — structural
+    if is_metadata and Path(file_path).name.lower().endswith(".json"):
+        findings.extend(_scan_manifest_exec(content, file_path))
+
+    # Toxic-flow / lethal-trifecta composition — whole-file capability co-occurrence
+    findings.extend(_composite_findings(content, file_path, lines, is_test_or_doc))
+
+    # npm install hooks — auto-run on `npm install` (supply-chain entry point)
+    if Path(file_path).name.lower() == "package.json":
+        findings.extend(_scan_install_hooks(content, file_path))
+
     # Check positive signals (once per file)
     for name, pattern in AUTH_POSITIVE_PATTERNS:
         if pattern.search(content):
             positives.append(name)
 
     return findings, positives
+
+
+def _iter_command_specs(node):
+    """Yield every {command, args} object nested anywhere in a parsed manifest."""
+    if isinstance(node, dict):
+        if isinstance(node.get("command"), str):
+            args = node.get("args")
+            args_str = " ".join(str(a) for a in args) if isinstance(args, list) else ""
+            yield f"{node['command']} {args_str}".strip()
+        for value in node.values():
+            yield from _iter_command_specs(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _iter_command_specs(value)
+
+
+def _scan_manifest_exec(content: str, file_path: str) -> list[Finding]:
+    """Inspect an MCP manifest's command/args for rug-pull exec (CVE-2025-54136).
+
+    A mutable mcp.json/server.json whose command launches an inline interpreter-eval
+    or pipes a remote fetch to a shell is the MCPoison vector: the client re-reads the
+    file, so a swapped command runs on re-launch. Structural (parses JSON), not per-line.
+    """
+    findings: list[Finding] = []
+    try:
+        data = json.loads(content)
+    except (ValueError, TypeError):
+        return findings
+    seen: set[tuple[str, str]] = set()
+    for command_line in _iter_command_specs(data):
+        for name, pattern, severity in MANIFEST_EXEC_PATTERNS:
+            if pattern.search(command_line):
+                if (name, command_line) in seen:
+                    continue
+                seen.add((name, command_line))
+                findings.append(Finding(
+                    category="dynamic_remote_load",
+                    name=name,
+                    severity=severity,
+                    file_path=file_path,
+                    line_number=1,
+                    snippet=command_line[:120],
+                ))
+                break  # one finding per command spec
+    return findings
+
+
+def _scan_install_hooks(content: str, file_path: str) -> list[Finding]:
+    """Flag npm pre/post/install lifecycle scripts (a top supply-chain vector).
+
+    These run automatically on `npm install`. Presence alone is a medium signal;
+    a hook that fetches/pipes-to-shell/evals is escalated to critical.
+    """
+    findings: list[Finding] = []
+    try:
+        data = json.loads(content)
+    except (ValueError, TypeError):
+        return findings
+    scripts = data.get("scripts") if isinstance(data, dict) else None
+    if not isinstance(scripts, dict):
+        return findings
+    for hook in NPM_INSTALL_HOOKS:
+        cmd = scripts.get(hook)
+        if not isinstance(cmd, str) or not cmd.strip():
+            continue
+        if INSTALL_SCRIPT_DANGER_RE.search(cmd):
+            severity, label = "critical", "runs remote/shell/eval content"
+        else:
+            severity, label = "medium", "auto-runs on install"
+        findings.append(Finding(
+            category="install_hook",
+            name=f"npm '{hook}' lifecycle script ({label})",
+            severity=severity,
+            file_path=file_path,
+            line_number=1,
+            snippet=f"{hook}: {cmd}"[:120],
+        ))
+    return findings
+
+
+def _composite_findings(
+    content: str,
+    file_path: str,
+    lines: list[str],
+    is_test_or_doc: bool,
+) -> list[Finding]:
+    """The lethal trifecta: private-data read + untrusted input + outbound send.
+
+    Each capability is benign alone; together in one tool they form the
+    prompt-injection → exfiltration chain. We require ALL THREE legs present to
+    keep precision high — a pure API wrapper that reads an env key and posts to
+    one endpoint, with no untrusted-content ingestion, does NOT trigger.
+    Emits at most one finding per file.
+    """
+    if not (
+        UNTRUSTED_INPUT_RE.search(content)
+        and OUTBOUND_SEND_RE.search(content)
+        and (SENSITIVE_READ_RE.search(content) or FILE_READ_RE.search(content))
+    ):
+        return []
+
+    def _hits(rx: re.Pattern[str]) -> list[int]:
+        out = []
+        for i, ln in enumerate(lines):
+            stripped = ln.strip()
+            if not stripped or stripped.startswith(("#", "//", "*", "/*")):
+                continue
+            if rx.search(ln):
+                out.append(i + 1)
+        return out
+
+    untrusted = _hits(UNTRUSTED_INPUT_RE)
+    outbound = _hits(OUTBOUND_SEND_RE)
+    sensitive = _hits(SENSITIVE_READ_RE)
+    file_read = _hits(FILE_READ_RE)
+    if not (untrusted and outbound and (sensitive or file_read)):
+        return []
+
+    if sensitive:
+        name = "Lethal trifecta: private-data read + untrusted input + outbound network"
+        severity = "high"
+        line = sensitive[0]
+    else:
+        name = "Toxic flow: file read + untrusted input + outbound network"
+        severity = "medium"
+        line = file_read[0]
+
+    if is_test_or_doc and severity in ("critical", "high"):
+        severity = "medium"
+
+    return [Finding(
+        category="toxic_flow",
+        name=name,
+        severity=severity,
+        file_path=file_path,
+        line_number=line,
+        snippet="capability composition — each part benign alone, dangerous together",
+    )]
 
 
 def _calculate_trust_score(result: ScanResult) -> int:
