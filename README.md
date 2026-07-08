@@ -11,17 +11,29 @@ Available as a **GitHub Action** and a **CLI tool**.
 
 ## Why?
 
-We scanned 28 of the most popular MCP servers on GitHub. The results:
+We statically scanned **7,029 public MCP servers** (part of a 35,689-endpoint agent-ecosystem corpus):
 
-| Finding | % of repos |
-|---------|-----------|
-| Unsafe shell/exec patterns | **92.9%** |
-| Filesystem access without sandboxing | 85.7% |
-| No authentication checks | 25.0% |
-| Hardcoded secrets | **17.9%** |
-| **Average trust score** | **25.8/100** |
+- **9% — nearly 1 in 11 — ship at least one high or critical issue** detectable by static analysis alone
+- Most common: hardcoded secrets, unsafe shell/exec with user-controllable input, credential-exfiltration paths, filesystem access far broader than advertised
 
-MCP servers run on your machine with access to your files, shell, and API keys. Most have no security review process.
+Full prevalence data + methodology: [Agent Tool Supply-Chain Security: Prevalence from 35,689 Scans](https://github.com/agentgraph-co/agentgraph/blob/main/docs/research/agent-tool-supply-chain-prevalence-2026.md).
+
+MCP servers run on your machine with access to your files, shell, and API keys — and increasingly get called in a loop by autonomous agents with nobody watching. Recent incidents like [GitLost](https://noma.security/blog/gitlost-how-we-tricked-githubs-ai-agent-into-leaking-private-repos/) (GitHub's AI agent tricked into leaking private repos) and [MCPoison / CVE-2025-54136](https://nvd.nist.gov/vuln/detail/CVE-2025-54136) (the Cursor `mcp.json` rug-pull) live on this exact attack surface. Most MCP servers have no security review process.
+
+## What it detects
+
+The open-source scanner covers six finding categories:
+
+| Category | Examples |
+|----------|----------|
+| `secret` | Hardcoded API keys, tokens, credentials |
+| `unsafe_exec` | `shell=True` with user input, `eval`/`exec` on external data |
+| `exfiltration` | Env vars / secrets piped into network calls |
+| `fs_access` | "Read a file" servers that can walk the entire home directory |
+| `obfuscation` | Base64-packed or dynamically-assembled code |
+| Missing auth | Tool endpoints with no authentication boundary |
+
+The hosted scanner at **[agentgraph.co/check](https://agentgraph.co/check)** additionally detects rug-pull / dynamic remote loading, manifest-exec (the MCPoison class), invisible-Unicode payloads, prompt injection in tool descriptions and manifests, install-hook attacks, insecure deserialization, and lethal-trifecta capability compositions (the GitLost class) — and signs every verdict as an offline-verifiable attestation with tool-definition pinning and drift detection.
 
 ---
 
